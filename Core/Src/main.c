@@ -19,16 +19,20 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "fdcan.h"
+#include "tim.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "main.h"
+#include "PID.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+  void pid_init(PID *pid, float kp, float ki, float kd);
+  void fdcan_filter_init(void);
+  #include <stdint.h>
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -45,6 +49,7 @@
 
 /* USER CODE BEGIN PV */
 
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -56,6 +61,136 @@ static void MPU_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+volatile uint32_t timer1_ms = 0;
+ volatile cnt_send = 0;
+uint8_t current[8] = {0,0,0,0,0,0,0,0};
+float current_pos = 0;
+float current_vel = 0;
+PID pos, vel;
+
+typedef struct {
+    uint16_t MchanicalAngle;    //!<@brief 机械角度
+    int16_t Speed;              //!<@brief 转速
+    uint16_t LsatAngle;         //!<@brief 上一次的机械角度
+    int16_t r;                  //!<@brief 圈数
+    int32_t Angle;              //!<@brief 连续化机械角度 @warning 由于启动时角度不确定，启动时连续化角度可能有一圈的偏差
+    float Angle_DEG;            //!<@brief 连续化角度制角度 @warning 由于启动时角度不确定，启动时连续化角度可能有一圈的偏差
+} M2006_TypeDef;
+
+M2006_TypeDef M2006;
+
+void M2006_Receive(M2006_TypeDef *Dst, uint8_t *Data) {
+    Dst->MchanicalAngle = (uint16_t)(Data[0] << 8 | Data[1]);
+    Dst->Speed = (int16_t)(Data[2] << 8 | Data[3]);
+
+    int16_t diff = Dst->MchanicalAngle - Dst->LsatAngle;
+
+    if (diff > 4000)
+        Dst->r--;
+    if (diff < -4000)
+        Dst->r++;
+
+    Dst->Angle = Dst->r * 8192 + Dst->MchanicalAngle;
+    Dst->Angle_DEG = Dst->Angle * 0.0439453125f;
+    Dst->LsatAngle = Dst->MchanicalAngle;
+}
+
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan,uint32_t RxFifo0ITs)
+{
+  if(hfdcan->Instance == FDCAN1)
+  {
+    FDCAN_RxHeaderTypeDef RxHeader;
+    uint8_t RxData[8];
+      if (HAL_FDCAN_GetRxMessage(
+                    hfdcan,
+                    FDCAN_RX_FIFO0,
+                    &RxHeader,
+                    RxData) != HAL_OK)
+            {
+                Error_Handler();
+            }
+            if (RxHeader.Identifier == 0x201)
+            {
+               M2006_Receive(&M2006, RxData);
+            }
+  }
+}
+int rm_send_2006(uint8_t *send_current)
+{
+    FDCAN_TxHeaderTypeDef txHeader = {0};
+    txHeader.Identifier = 0x201;
+    txHeader.IdType              = FDCAN_STANDARD_ID;
+    txHeader.TxFrameType         = FDCAN_DATA_FRAME;
+    txHeader.DataLength          = FDCAN_DLC_BYTES_8;
+    txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    txHeader.BitRateSwitch       = FDCAN_BRS_OFF;
+    txHeader.FDFormat            = FDCAN_CLASSIC_CAN;
+    txHeader.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
+    txHeader.MessageMarker       = 0x00;
+    if(HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, send_current) == HAL_OK)
+    {
+        return 1;
+    }else
+    {
+        return 0;
+    }
+}
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM2)
+    {
+        timer1_ms++;
+        
+        PID_Control(M2006.Angle_DEG, 10000.0f, &pos);
+        current_pos += pos.pid_out;
+        PID_Control(M2006.Speed, pos.pid_out, &vel);
+        current[0] = (uint8_t)((uint16_t)(vel.pid_out) >>8);
+        current[1] = (uint8_t)((uint16_t)vel.pid_out);
+        cnt_send += rm_send_2006(current);
+       
+    }
+}
+  void pid_init(PID *pid,float kp,float ki,float kd)
+  {
+    pid->Kp = kp;
+    pid->Ki = ki;
+    pid->Kd = kd;
+    pid->error_last = 0;
+    pid->error_now = 0;
+    pid->error_inter = 0;
+    pid->pid_out = 0;
+    pid->limit = 10000;
+    pid->output_limit = 10000;
+  }
+
+
+void FDCAN_Filter_Init(FDCAN_HandleTypeDef* hfdcan)
+{   
+    FDCAN_FilterTypeDef Sta_filter; 
+    Sta_filter.IdType = FDCAN_STANDARD_ID;
+    Sta_filter.FilterIndex = 0;
+    Sta_filter.FilterType = FDCAN_FILTER_MASK;
+    Sta_filter.FilterID1 = 0x00;
+    Sta_filter.FilterID2 = 0x00;
+    Sta_filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0; 
+    HAL_FDCAN_ConfigFilter(hfdcan,&Sta_filter);
+	
+	
+	FDCAN_FilterTypeDef Ext_filter;
+	Ext_filter.IdType = FDCAN_EXTENDED_ID;
+	Ext_filter.FilterIndex = 1;
+	Ext_filter.FilterType = FDCAN_FILTER_MASK;
+	Ext_filter.FilterID1 = 0x00;
+  Ext_filter.FilterID2 = 0x00;
+  Ext_filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0; 
+	HAL_FDCAN_ConfigFilter(hfdcan,&Ext_filter);	
+    
+  HAL_FDCAN_ConfigGlobalFilter(hfdcan, FDCAN_REJECT, FDCAN_REJECT, FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE); 
+  HAL_FDCAN_ConfigFifoWatermark(hfdcan, FDCAN_CFG_RX_FIFO0, 1);
+  //HAL_FDCAN_Start(hfdcan);
+}
+
 
 /* USER CODE END 0 */
 
@@ -92,8 +227,15 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_FDCAN1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  FDCAN_Filter_Init(&hfdcan1);
+  HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0); 
+	HAL_FDCAN_Start(&hfdcan1);
 
+  pid_init(&pos,13.0,0,0);
+  pid_init(&vel,10.0,0,0);
+  HAL_TIM_Base_Start_IT(&htim2);
   /* USER CODE END 2 */
 
   /* Infinite loop */

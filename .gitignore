@@ -1,0 +1,9 @@
+/build/
+/cmake/
+/.vscode/
+*.obj
+*.su
+*.o
+*.elf
+*.bin
+*.hex

@@ -1,9 +1,66 @@
+# ---------------------------------------------------------------------------
+# STM32CubeMX + CMake/Ninja 工程
+# ---------------------------------------------------------------------------
+
+# 构建输出目录（cmake --preset Debug / Release 的全部生成物）
 /build/
-/cmake/
-/.vscode/
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.ninja
+*.ninja_deps
+*.ninja_log
+
+# 编译 / 链接产物
+*.o
 *.obj
 *.su
-*.o
+*.d
+*.a
+*.lib
 *.elf
 *.bin
 *.hex
+*.srec
+*.map
+*.list
+*.dis
+*.dump
+*.gcda
+*.gcno
+*.log
+
+# 注意：/cmake/ 下放的是工具链文件（gcc-arm-none-eabi.cmake、
+# starm-clang.cmake）和 CubeMX 生成的 cmake/stm32cubemx/CMakeLists.txt，
+# 它们是构建必需的源文件，必须纳入版本控制，因此不要忽略整个 cmake 目录。
+
+# ---------------------------------------------------------------------------
+# CubeMX / STM32CubeIDE 备份与本地元数据
+# ---------------------------------------------------------------------------
+*.ioc.bak
+*.ioc~
+*.mxproject.bak
+.settings/
+.metadata/
+
+# ---------------------------------------------------------------------------
+# IDE / 编辑器本地文件
+# （.vscode/c_cpp_properties.json 已在版本控制中，会继续被跟踪）
+# ---------------------------------------------------------------------------
+/.vscode/
+*.code-workspace
+.clangd/
+.cache/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+*.orig
+
+# ---------------------------------------------------------------------------
+# 操作系统
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db

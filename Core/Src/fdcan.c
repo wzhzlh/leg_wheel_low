@@ -52,10 +52,9 @@ void MX_FDCAN1_Init(void)
   hfdcan1.Init.DataTimeSeg1 = 1;
   hfdcan1.Init.DataTimeSeg2 = 1;
   hfdcan1.Init.MessageRAMOffset = 0;
-  /* One standard filter is used for the DJI feedback frames. */
   hfdcan1.Init.StdFiltersNbr = 1;
-  hfdcan1.Init.ExtFiltersNbr = 0;
-  hfdcan1.Init.RxFifo0ElmtsNbr = 10;
+  hfdcan1.Init.ExtFiltersNbr = 1;
+  hfdcan1.Init.RxFifo0ElmtsNbr = 16;
   hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
   hfdcan1.Init.RxFifo1ElmtsNbr = 0;
   hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
@@ -90,7 +89,15 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
   /** Initializes the peripherals clock
   */
     PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_FDCAN;
-    PeriphClkInitStruct.FdcanClockSelection = RCC_FDCANCLKSOURCE_HSE;
+    PeriphClkInitStruct.PLL2.PLL2M = 2;
+    PeriphClkInitStruct.PLL2.PLL2N = 16;
+    PeriphClkInitStruct.PLL2.PLL2P = 2;
+    PeriphClkInitStruct.PLL2.PLL2Q = 2;
+    PeriphClkInitStruct.PLL2.PLL2R = 2;
+    PeriphClkInitStruct.PLL2.PLL2RGE = RCC_PLL2VCIRANGE_3;
+    PeriphClkInitStruct.PLL2.PLL2VCOSEL = RCC_PLL2VCOWIDE;
+    PeriphClkInitStruct.PLL2.PLL2FRACN = 0.0;
+    PeriphClkInitStruct.FdcanClockSelection = RCC_FDCANCLKSOURCE_PLL2;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
     {
       Error_Handler();
@@ -112,8 +119,10 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
     /* FDCAN1 interrupt Init */
-    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 4, 0);
+    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
+    HAL_NVIC_SetPriority(FDCAN1_IT1_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(FDCAN1_IT1_IRQn);
   /* USER CODE BEGIN FDCAN1_MspInit 1 */
 
   /* USER CODE END FDCAN1_MspInit 1 */
@@ -139,6 +148,7 @@ void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* fdcanHandle)
 
     /* FDCAN1 interrupt Deinit */
     HAL_NVIC_DisableIRQ(FDCAN1_IT0_IRQn);
+    HAL_NVIC_DisableIRQ(FDCAN1_IT1_IRQn);
   /* USER CODE BEGIN FDCAN1_MspDeInit 1 */
 
   /* USER CODE END FDCAN1_MspDeInit 1 */

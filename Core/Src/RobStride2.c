@@ -1,4 +1,9 @@
 #include "RobStride2.h"
+#include <string.h>
+
+/* 等待空闲发送队列的忙等次数上限（纯计数轮询，不依赖 HAL 时基）：
+   1 Mbps 下 8 字节扩展帧约 150 us，正常情况下第一次投递就能成功。 */
+#define CAN_TX_SPIN_LIMIT  (20000U)
 
 static inline uint16_t float_to_uint16(float x, float x_min, float x_max)
 {
@@ -11,9 +16,11 @@ static inline uint16_t float_to_uint16(float x, float x_min, float x_max)
     return (uint16_t)((offset * 65535.0f) / span);
 }
 
-void RobStrideInit(RobStride_t *device, CAN_HandleTypeDef *hcan, uint32_t id, RobStrideType type)
+void RobStrideInit(RobStride_t *device, FDCAN_HandleTypeDef *hfdcan, uint32_t id, RobStrideType type)
 {
-    device->hcan = hcan;
+    /* H7 的 FDCAN 用 Tx FIFO/Queue，无需（也不能）使能 bxCAN 的 TX 邮箱空中断。
+       接收只开 FDCAN_IT_RX_FIFO0_NEW_MESSAGE，见 main.c 的 MX_FDCAN1_Init 之后。 */
+    device->hfdcan = hfdcan;
     device->motor_id = id;
     device->host_id = HOST_ID;
     device->type = type;
@@ -22,19 +29,19 @@ void RobStrideInit(RobStride_t *device, CAN_HandleTypeDef *hcan, uint32_t id, Ro
 uint32_t RobStrideEnable(RobStride_t *device)
 {
     uint8_t buf[8] = {0};
-    return RobStrideSend(device, (3 << 24) | (device->host_id << 8) | (device->motor_id), buf); // 发送使能命令
+    return RobStrideSend(device, (3 << 24) | (device->host_id << 8) | (device->motor_id), buf);
 }
 
 uint32_t RobStrideDisable(RobStride_t *device, uint8_t clear_error)
 {
     uint8_t buf[8] = {clear_error};
-    return RobStrideSend(device, (4 << 24) | (device->host_id << 8) | (device->motor_id), buf); // 发送使能命令
+    return RobStrideSend(device, (4 << 24) | (device->host_id << 8) | (device->motor_id), buf);
 }
 
 uint32_t RobStrideResetAngle(RobStride_t *device)
 {
     uint8_t buf[8] = {1};
-    return RobStrideSend(device, (6 << 24) | (device->host_id << 8) | (device->motor_id), buf); // 发送使能命令
+    return RobStrideSend(device, (6 << 24) | (device->host_id << 8) | (device->motor_id), buf);
 }
 
 uint32_t RobStrideGet(RobStride_t *device, uint16_t cmd)
@@ -42,7 +49,7 @@ uint32_t RobStrideGet(RobStride_t *device, uint16_t cmd)
     uint8_t buf[8] = {0};
     *((uint16_t *)buf) = cmd;
     uint32_t Extid = (17 << 24) | (device->host_id << 8) | (device->motor_id);
-    return RobStrideSend(device, Extid, buf); // 发送使能命令
+    return RobStrideSend(device, Extid, buf);
 }
 
 uint32_t RobStrideSetMode(RobStride_t *device, RobStrideMode mode)
@@ -51,7 +58,7 @@ uint32_t RobStrideSetMode(RobStride_t *device, RobStrideMode mode)
     buf[0] = (uint8_t)PARAM_RUN_MODE;
     buf[1] = (uint8_t)(PARAM_RUN_MODE >> 8);
     buf[4] = (uint8_t)mode;
-    return RobStrideSend(device, (18 << 24) | (device->host_id << 8) | (device->motor_id), buf); // 发送使能命令
+    return RobStrideSend(device, (18 << 24) | (device->host_id << 8) | (device->motor_id), buf);
 }
 
 uint32_t RobStrideMotionControl(RobStride_t *device, uint8_t motor_id, float torque, float angle, float omega, float kp, float kd)
@@ -71,71 +78,47 @@ uint32_t RobStrideMotionControl(RobStride_t *device, uint8_t motor_id, float tor
     switch (device->type)
     {
     case RobStride_01:
-        tq_min = -17.0f;
-        tq_max = 17.0f;
-        omega_min = -44.0f;
-        omega_max = 44.0f;
-        kp_min = 0.0f;
-        kp_max = 500.0f;
-        kd_min = 0.0f;
-        kd_max = 5.0f;
+        tq_min = -17.0f;  tq_max = 17.0f;
+        omega_min = -44.0f; omega_max = 44.0f;
+        kp_min = 0.0f; kp_max = 500.0f;
+        kd_min = 0.0f; kd_max = 5.0f;
         break;
     case RobStride_02:
-        tq_min = -17.0f;
-        tq_max = 17.0f;
-        omega_min = -44.0f;
-        omega_max = 44.0f;
-        kp_min = 0.0f;
-        kp_max = 5000.0f;
-        kd_min = 0.0f;
-        kd_max = 5.0f;
+        tq_min = -17.0f;  tq_max = 17.0f;
+        omega_min = -44.0f; omega_max = 44.0f;
+        kp_min = 0.0f; kp_max = 5000.0f;
+        kd_min = 0.0f; kd_max = 5.0f;
         break;
     case RobStride_03:
-        tq_min = -60.0f;
-        tq_max = 60.0f;
-        omega_min = -20.0f;
-        omega_max = 20.0f;
-        kp_min = 0.0f;
-        kp_max = 5000.0f;
-        kd_min = 0.0f;
-        kd_max = 100.0f;
+        tq_min = -60.0f;  tq_max = 60.0f;
+        omega_min = -20.0f; omega_max = 20.0f;
+        kp_min = 0.0f; kp_max = 5000.0f;
+        kd_min = 0.0f; kd_max = 100.0f;
         break;
     case RobStride_04:
-        tq_min = -120.0f;
-        tq_max = 120.0f;
-        omega_min = -15.0f;
-        omega_max = 15.0f;
-        kp_min = 0.0f;
-        kp_max = 5000.0f;
-        kd_min = 0.0f;
-        kd_max = 100.0f;
+        tq_min = -120.0f; tq_max = 120.0f;
+        omega_min = -15.0f; omega_max = 15.0f;
+        kp_min = 0.0f; kp_max = 5000.0f;
+        kd_min = 0.0f; kd_max = 100.0f;
         break;
-		case RobStride_EL05:
-				tq_min = -6.0f;
-        tq_max = 6.0f;
-				omega_min = -50.0f;
-        omega_max = 50.0f;
-				kp_min = 0.0f;
-        kp_max = 500.0f;
-        kd_min = 0.0f;
-        kd_max = 5.0f;
-				break;
-		case RobStride_06:
-				tq_min = -36.0f;
-        tq_max = 36.0f;
-				omega_min = -50.0f;
-        omega_max = 50.0f;
-				kp_min = 0.0f;
-        kp_max = 5000.0f;
-        kd_min = 0.0f;
-        kd_max = 100.0f;
-				break;
+    case RobStride_EL05:
+        tq_min = -6.0f;   tq_max = 6.0f;
+        omega_min = -50.0f; omega_max = 50.0f;
+        kp_min = 0.0f; kp_max = 500.0f;
+        kd_min = 0.0f; kd_max = 5.0f;
+        break;
+    case RobStride_06:
+        tq_min = -36.0f;  tq_max = 36.0f;
+        omega_min = -50.0f; omega_max = 50.0f;
+        kp_min = 0.0f; kp_max = 5000.0f;
+        kd_min = 0.0f; kd_max = 100.0f;
+        break;
     default:
         return 2; // 无效型号，返回错误码
     }
 
     // 量化参数（角度范围固定为-4π~4π）
-    uint16_t pos_u = float_to_uint16(angle, -4.0f * M_PI, 4.0f * M_PI);
+    uint16_t pos_u = float_to_uint16(angle, -4.0f * ROBSTRIDE_PI, 4.0f * ROBSTRIDE_PI);
     uint16_t vel_u = float_to_uint16(omega, omega_min, omega_max);
     uint16_t kp_u = float_to_uint16(kp, kp_min, kp_max);
     uint16_t kd_u = float_to_uint16(kd, kd_min, kd_max);
@@ -152,9 +135,8 @@ uint32_t RobStrideMotionControl(RobStride_t *device, uint8_t motor_id, float tor
     buf[7] = kd_u & 0xFF;
 
     // 构造29位扩展ID：Bit28~24=0x1，Bit23~8=扭矩量化值，Bit7~0=电机ID
-    uint32_t ExtID = (0x1 << 24) | ((uint32_t)tq_u << 8) | (motor_id & 0xFF);
+    uint32_t ExtID = (0x1U << 24) | ((uint32_t)tq_u << 8) | (motor_id & 0xFF);
 
-    // 发送CAN帧（假设RobStrideSend返回0为成功，其他为错误）
     return RobStrideSend(device, ExtID, buf);
 }
 
@@ -205,7 +187,9 @@ uint32_t RobStrideSetLocPID(RobStride_t *device, float kp)
 
 uint32_t RobStrideSetCurPID(RobStride_t *device, float kp, float ki)
 {
-    // TODO:设置电流环PID（一般不需要，所以就不写了）
+    (void)kp;
+    (void)ki;
+    // TODO: 设置电流环PID（一般不需要，所以就不写了）
     return 0;
 }
 
@@ -233,16 +217,18 @@ uint32_t RobStrideSetTorqueLimit(RobStride_t *device, float torque)
     return RobStrideSend(device, (18 << 24) | (device->host_id << 8) | (device->motor_id), buf);
 }
 
-uint32_t RobStrideRecv_Handle(RobStride_t *device, CAN_HandleTypeDef *hcan, uint32_t ID, uint8_t *buf)
+uint32_t RobStrideRecv_Handle(RobStride_t *device, FDCAN_HandleTypeDef *hfdcan, uint32_t ID, uint8_t *buf)
 {
-    if (hcan->Instance != device->hcan->Instance)
+    if (device == NULL || device->hfdcan == NULL || hfdcan == NULL)
+        return 0;
+    if (hfdcan->Instance != device->hfdcan->Instance)
         return 0;
     if (((ID >> 8) & 0x00FF) != device->motor_id)
         return 0;
     uint32_t type = ID >> 24;
     if (type == 0)
     {
-        // TODO:尝试获取设备信息以检查通信
+        // TODO: 尝试获取设备信息以检查通信
     }
     else if (type == 2) // 存储反馈的数据
     {
@@ -250,40 +236,31 @@ uint32_t RobStrideRecv_Handle(RobStride_t *device, CAN_HandleTypeDef *hcan, uint
 
         // 提取公共部分：反馈ID和角度（所有型号角度范围一致）
         device->state.feedback = ID >> 16;
-        device->state.rad = (float)(((DEPACK_U8_TO_U16_FLIP(buf[0], buf[1])) - 32767.0f) * 4.0f * M_PI / 32767.0f);
+        device->state.rad = (float)(((DEPACK_U8_TO_U16_FLIP(buf[0], buf[1])) - 32767.0f) * 4.0f * ROBSTRIDE_PI / 32767.0f);
 
         // 根据设备类型设置角速度和扭矩的缩放系数
         switch (device->type)
         {
         case RobStride_01:
-            omega_scale = 44.0f;  // 角速度范围 ±44
-            torque_scale = 17.0f; // 扭矩范围 ±17
+            omega_scale = 44.0f;  torque_scale = 17.0f;
             break;
         case RobStride_02:
-            omega_scale = 44.0f;  // 角速度范围 ±44
-            torque_scale = 17.0f; // 扭矩范围 ±17
+            omega_scale = 44.0f;  torque_scale = 17.0f;
             break;
         case RobStride_03:
-            omega_scale = 20.0f;  // 角速度范围 ±20
-            torque_scale = 60.0f; // 扭矩范围 ±60
+            omega_scale = 20.0f;  torque_scale = 60.0f;
             break;
         case RobStride_04:
-            omega_scale = 15.0f;   // 角速度范围 ±15
-            torque_scale = 120.0f; // 扭矩范围 ±120
+            omega_scale = 15.0f;  torque_scale = 120.0f;
             break;
-				case RobStride_EL05:
-						omega_scale = 50.0f;   // 角速度范围 ±50
-            torque_scale = 6.0f; // 扭矩范围 ±6
-						break;
-				case RobStride_06:
-						omega_scale = 50.0f;   // 角速度范围 ±50
-            torque_scale = 36.0f; // 扭矩范围 ±36
-						break;
+        case RobStride_EL05:
+            omega_scale = 50.0f;  torque_scale = 6.0f;
+            break;
+        case RobStride_06:
+            omega_scale = 50.0f;  torque_scale = 36.0f;
+            break;
         default:
-            // 处理未知型号（可选：设置默认值或报错）
-            omega_scale = 0.0f;
-            torque_scale = 0.0f;
-            return 1; // 返回错误码
+            return 1; // 未知型号
         }
 
         // 统一计算角速度、扭矩和温度（所有型号温度计算方式一致）
@@ -293,17 +270,18 @@ uint32_t RobStrideRecv_Handle(RobStride_t *device, CAN_HandleTypeDef *hcan, uint
     }
     else if (type == 21) // 复制错误信息到电机状态结构体
     {
-        device->state.error = *((uint64_t *)buf);
+        // M7 上直接对 uint8_t 缓冲区做 uint64_t 解引用可能触发非对齐访问异常
+        memcpy(&device->state.error, buf, sizeof(device->state.error));
     }
     else if (type == 17) // 请求读取单个参数时的处理
     {
         uint16_t cmd = DEPACK_U8_TO_U16(buf[0], buf[1]);
         switch (cmd)
         {
-        case PARAM_RUN_MODE: // 当前控制模式
+        case PARAM_RUN_MODE:
             device->param.run_mode = buf[4];
             break;
-        case PARAM_LIMIT_TORQUE: // 力矩限制
+        case PARAM_LIMIT_TORQUE:
             device->param.torque_limit = *((float *)&buf[4]);
             break;
         case PARAM_CUR_KP:
@@ -345,13 +323,32 @@ uint32_t RobStrideRecv_Handle(RobStride_t *device, CAN_HandleTypeDef *hcan, uint
 
 uint32_t RobStrideSend(RobStride_t *device, uint32_t ExtID, uint8_t *buf)
 {
-    CAN_TxHeaderTypeDef head;
-    uint32_t mailbox;
-    head.StdId = 0;
-    head.ExtId = ExtID;
-    head.IDE = CAN_ID_EXT;
-    head.RTR = CAN_RTR_DATA;
-    head.DLC = 8;
-    head.TransmitGlobalTime = DISABLE;
-    return HAL_CAN_AddTxMessage(device->hcan, &head, buf, &mailbox);
+    FDCAN_TxHeaderTypeDef head = {0};
+
+    head.Identifier          = ExtID;
+    head.IdType              = FDCAN_EXTENDED_ID;
+    head.TxFrameType         = FDCAN_DATA_FRAME;
+    head.DataLength          = FDCAN_DLC_BYTES_8;
+    head.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    head.BitRateSwitch       = FDCAN_BRS_OFF;
+    head.FDFormat            = FDCAN_CLASSIC_CAN;
+    head.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
+    head.MessageMarker       = 0x00U;
+
+    if (device == NULL || device->hfdcan == NULL)
+        return HAL_ERROR;
+
+    /* H7 的 Tx FIFO/Queue 深度只有 4，joint_control_task 每 4 ms 连发 4 帧，
+       队列满时 HAL_FDCAN_AddMessageToTxFifoQ 返回 HAL_ERROR 并丢帧。
+       直接重试投递，直到有空位（纯计数忙等，不依赖 HAL 时基）；总线无应答时
+       达到上限后丢帧返回 HAL_BUSY。 */
+    for (uint32_t spin = CAN_TX_SPIN_LIMIT; spin > 0U; --spin)
+    {
+        if (HAL_FDCAN_AddMessageToTxFifoQ(device->hfdcan, &head, buf) == HAL_OK)
+        {
+            return HAL_OK;
+        }
+    }
+
+    return HAL_BUSY;
 }

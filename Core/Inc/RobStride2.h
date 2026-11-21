@@ -3,7 +3,7 @@
 
 #include <stdlib.h>
 #include <stdint.h>
-#include "stm32f4xx_hal.h"
+#include "stm32h7xx_hal.h"
 
 #define HOST_ID 0xFD
 
@@ -26,7 +26,9 @@
 #define PARAM_SPD_KP             0x701F
 #define PARAM_SPD_KI             0x7020
 
-#define M_PI 3.141592653589793f
+/* H7 的 HAL 会间接包含 newlib 的 math.h（其中已有 M_PI，double 常量），
+   这里用独立名字，既避免重定义警告，也保持角度量化用 float 常量。 */
+#define ROBSTRIDE_PI 3.141592653589793f
 
 #define U16_FLIP(x) ((((uint16_t)(x))>>8)|(((uint16_t)(x))<<8))
 #define DEPACK_U8_TO_U16(low,high) (((uint16_t)(low))|(uint16_t)((uint16_t)(high)<<8))
@@ -40,8 +42,8 @@ typedef enum
     RobStride_02,
     RobStride_03,
     RobStride_04,
-		RobStride_EL05,
-		RobStride_06
+    RobStride_EL05,
+    RobStride_06
 }RobStrideType;
 
 typedef enum
@@ -81,38 +83,37 @@ typedef struct
 
 typedef struct
 {
-    //使用的CAN口
-    CAN_HandleTypeDef *hcan;
-    uint32_t motor_id;              //电机8位ID
-    uint32_t host_id;                //主机ID
+    // 使用的 CAN 口（H7 为 FDCAN 句柄）
+    FDCAN_HandleTypeDef *hfdcan;
+    uint32_t motor_id;              // 电机8位ID
+    uint32_t host_id;               // 主机ID
 
-    RobStrideType type;             //电机类型
-    RobStrideState_t state;           //电机运行时信息
-    RobStrideParam_t param;           //电机参数设置
+    RobStrideType type;             // 电机类型
+    RobStrideState_t state;         // 电机运行时信息
+    RobStrideParam_t param;         // 电机参数设置
 }RobStride_t;
 
-uint32_t RobStrideSend(RobStride_t *device,uint32_t ExtID,uint8_t* buf);
+uint32_t RobStrideSend(RobStride_t *device, uint32_t ExtID, uint8_t *buf);
 
-void RobStrideInit(RobStride_t *device, CAN_HandleTypeDef *hcan, uint32_t id, RobStrideType type);
-uint32_t RobStrideSetMode(RobStride_t *device,RobStrideMode mode);
+void RobStrideInit(RobStride_t *device, FDCAN_HandleTypeDef *hfdcan, uint32_t id, RobStrideType type);
+uint32_t RobStrideSetMode(RobStride_t *device, RobStrideMode mode);
 uint32_t RobStrideEnable(RobStride_t *device);
-uint32_t RobStrideDisable(RobStride_t *device,uint8_t clear_error);
+uint32_t RobStrideDisable(RobStride_t *device, uint8_t clear_error);
 uint32_t RobStrideResetAngle(RobStride_t *device);
-uint32_t RobStrideGet(RobStride_t *device,uint16_t cmd);
+uint32_t RobStrideGet(RobStride_t *device, uint16_t cmd);
 
 uint32_t RobStrideMotionControl(RobStride_t *device, uint8_t motor_id, float torque, float angle, float omega, float kp, float kd);
-uint32_t RobStrideTorqueControl(RobStride_t *device,float req);
-uint32_t RobStrideSpeedControl(RobStride_t *device,float vel);
-uint32_t RobStridePositionControl(RobStride_t *device,float pos);
-uint32_t RobStrideSetVelPID(RobStride_t *device,float kp,float ki);
-uint32_t RobStrideSetLocPID(RobStride_t *device,float kp);
-uint32_t RobStrideSetCurPID(RobStride_t *device,float kp,float ki);
-uint32_t RobStrideSetVelLimit(RobStride_t *device,float vel);
-uint32_t RobStrideSetCurLimit(RobStride_t *device,float cur);
-uint32_t RobStrideSetTorqueLimit(RobStride_t *device,float torque);
+uint32_t RobStrideTorqueControl(RobStride_t *device, float req);
+uint32_t RobStrideSpeedControl(RobStride_t *device, float vel);
+uint32_t RobStridePositionControl(RobStride_t *device, float pos);
+uint32_t RobStrideSetVelPID(RobStride_t *device, float kp, float ki);
+uint32_t RobStrideSetLocPID(RobStride_t *device, float kp);
+uint32_t RobStrideSetCurPID(RobStride_t *device, float kp, float ki);
+uint32_t RobStrideSetVelLimit(RobStride_t *device, float vel);
+uint32_t RobStrideSetCurLimit(RobStride_t *device, float cur);
+uint32_t RobStrideSetTorqueLimit(RobStride_t *device, float torque);
 
-//Base Function
-
-uint32_t RobStrideRecv_Handle(RobStride_t* device,CAN_HandleTypeDef *hcan,uint32_t ID,uint8_t* buf);
+// Base Function
+uint32_t RobStrideRecv_Handle(RobStride_t *device, FDCAN_HandleTypeDef *hfdcan, uint32_t ID, uint8_t *buf);
 
 #endif

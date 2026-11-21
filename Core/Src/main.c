@@ -18,21 +18,22 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "FreeRTOS.h"
+#include "cmsis_os2.h"
 #include "fdcan.h"
 #include "tim.h"
+#include "usb_device.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "main.h"
-#include "PID.h"
+#include <stdint.h>
+#include <stdio.h>
+#include "../../task/task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-  void pid_init(PID *pid, float kp, float ki, float kd);
-  void fdcan_filter_init(void);
-  #include <stdint.h>
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -49,149 +50,52 @@
 
 /* USER CODE BEGIN PV */
 
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MPU_Config(void);
+void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-volatile uint32_t timer1_ms = 0;
- volatile cnt_send = 0;
-uint8_t current[8] = {0,0,0,0,0,0,0,0};
-float current_pos = 0;
-float current_vel = 0;
-PID pos, vel;
 
-typedef struct {
-    uint16_t MchanicalAngle;    //!<@brief 机械角度
-    int16_t Speed;              //!<@brief 转速
-    uint16_t LsatAngle;         //!<@brief 上一次的机械角度
-    int16_t r;                  //!<@brief 圈数
-    int32_t Angle;              //!<@brief 连续化机械角度 @warning 由于启动时角度不确定，启动时连续化角度可能有一圈的偏差
-    float Angle_DEG;            //!<@brief 连续化角度制角度 @warning 由于启动时角度不确定，启动时连续化角度可能有一圈的偏差
-} M2006_TypeDef;
-
-M2006_TypeDef M2006;
-
-void M2006_Receive(M2006_TypeDef *Dst, uint8_t *Data) {
-    Dst->MchanicalAngle = (uint16_t)(Data[0] << 8 | Data[1]);
-    Dst->Speed = (int16_t)(Data[2] << 8 | Data[3]);
-
-    int16_t diff = Dst->MchanicalAngle - Dst->LsatAngle;
-
-    if (diff > 4000)
-        Dst->r--;
-    if (diff < -4000)
-        Dst->r++;
-
-    Dst->Angle = Dst->r * 8192 + Dst->MchanicalAngle;
-    Dst->Angle_DEG = Dst->Angle * 0.0439453125f;
-    Dst->LsatAngle = Dst->MchanicalAngle;
-}
-
-
-void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan,uint32_t RxFifo0ITs)
+/* 标准帧（M2006 0x201/0x202）与扩展帧（RobStride）各配一个全通掩码过滤器。
+   数量必须与 fdcan.c 的 StdFiltersNbr / ExtFiltersNbr 一致；两种 ID 类型的
+   FilterIndex 彼此独立编号，都从 0 开始。 */
+static void FDCAN_Filter_Init(FDCAN_HandleTypeDef *hfdcan)
 {
-  if(hfdcan->Instance == FDCAN1)
+  FDCAN_FilterTypeDef filter = {0};
+
+  filter.IdType       = FDCAN_STANDARD_ID;
+  filter.FilterIndex  = 0;
+  filter.FilterType   = FDCAN_FILTER_MASK;
+  filter.FilterID1    = 0x0000;
+  filter.FilterID2    = 0x0000;   // 掩码全 0 = 全部接收
+  filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+  if (HAL_FDCAN_ConfigFilter(hfdcan, &filter) != HAL_OK)
   {
-    FDCAN_RxHeaderTypeDef RxHeader;
-    uint8_t RxData[8];
-      if (HAL_FDCAN_GetRxMessage(
-                    hfdcan,
-                    FDCAN_RX_FIFO0,
-                    &RxHeader,
-                    RxData) != HAL_OK)
-            {
-                Error_Handler();
-            }
-            if (RxHeader.Identifier == 0x201)
-            {
-               M2006_Receive(&M2006, RxData);
-            }
-  }
-}
-int rm_send_2006(uint8_t *send_current)
-{
-    FDCAN_TxHeaderTypeDef txHeader = {0};
-    txHeader.Identifier = 0x201;
-    txHeader.IdType              = FDCAN_STANDARD_ID;
-    txHeader.TxFrameType         = FDCAN_DATA_FRAME;
-    txHeader.DataLength          = FDCAN_DLC_BYTES_8;
-    txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-    txHeader.BitRateSwitch       = FDCAN_BRS_OFF;
-    txHeader.FDFormat            = FDCAN_CLASSIC_CAN;
-    txHeader.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
-    txHeader.MessageMarker       = 0x00;
-    if(HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, send_current) == HAL_OK)
-    {
-        return 1;
-    }else
-    {
-        return 0;
-    }
-}
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-    if (htim->Instance == TIM2)
-    {
-        timer1_ms++;
-        
-        PID_Control(M2006.Angle_DEG, 10000.0f, &pos);
-        current_pos += pos.pid_out;
-        PID_Control(M2006.Speed, pos.pid_out, &vel);
-        current[0] = (uint8_t)((uint16_t)(vel.pid_out) >>8);
-        current[1] = (uint8_t)((uint16_t)vel.pid_out);
-        cnt_send += rm_send_2006(current);
-       
-    }
-}
-  void pid_init(PID *pid,float kp,float ki,float kd)
-  {
-    pid->Kp = kp;
-    pid->Ki = ki;
-    pid->Kd = kd;
-    pid->error_last = 0;
-    pid->error_now = 0;
-    pid->error_inter = 0;
-    pid->pid_out = 0;
-    pid->limit = 10000;
-    pid->output_limit = 10000;
+    Error_Handler();
   }
 
+  filter.IdType      = FDCAN_EXTENDED_ID;
+  filter.FilterIndex = 0;
+  if (HAL_FDCAN_ConfigFilter(hfdcan, &filter) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-void FDCAN_Filter_Init(FDCAN_HandleTypeDef* hfdcan)
-{   
-    FDCAN_FilterTypeDef Sta_filter; 
-    Sta_filter.IdType = FDCAN_STANDARD_ID;
-    Sta_filter.FilterIndex = 0;
-    Sta_filter.FilterType = FDCAN_FILTER_MASK;
-    Sta_filter.FilterID1 = 0x00;
-    Sta_filter.FilterID2 = 0x00;
-    Sta_filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0; 
-    HAL_FDCAN_ConfigFilter(hfdcan,&Sta_filter);
-	
-	
-	FDCAN_FilterTypeDef Ext_filter;
-	Ext_filter.IdType = FDCAN_EXTENDED_ID;
-	Ext_filter.FilterIndex = 1;
-	Ext_filter.FilterType = FDCAN_FILTER_MASK;
-	Ext_filter.FilterID1 = 0x00;
-  Ext_filter.FilterID2 = 0x00;
-  Ext_filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0; 
-	HAL_FDCAN_ConfigFilter(hfdcan,&Ext_filter);	
-    
-  HAL_FDCAN_ConfigGlobalFilter(hfdcan, FDCAN_REJECT, FDCAN_REJECT, FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE); 
+  // 非匹配帧一律拒绝，远程帧按过滤器处理
+  if (HAL_FDCAN_ConfigGlobalFilter(hfdcan, FDCAN_REJECT, FDCAN_REJECT,
+                                   FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE) != HAL_OK)
+  {
+    Error_Handler();
+  }
   HAL_FDCAN_ConfigFifoWatermark(hfdcan, FDCAN_CFG_RX_FIFO0, 1);
-  //HAL_FDCAN_Start(hfdcan);
 }
-
-
 /* USER CODE END 0 */
 
 /**
@@ -207,6 +111,14 @@ int main(void)
 
   /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
+
+  /* Enable the CPU Cache */
+
+  /* Enable I-Cache---------------------------------------------------------*/
+  SCB_EnableICache();
+
+  /* Enable D-Cache---------------------------------------------------------*/
+  SCB_EnableDCache();
 
   /* MCU Configuration--------------------------------------------------------*/
 
@@ -227,16 +139,33 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_FDCAN1_Init();
-  MX_TIM2_Init();
+  MX_TIM13_Init();
   /* USER CODE BEGIN 2 */
   FDCAN_Filter_Init(&hfdcan1);
-  HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0); 
-	HAL_FDCAN_Start(&hfdcan1);
+  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  // 只开 FIFO0 新报文中断；TX 邮箱空中断在 H7 上不使能，避免中断风暴
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-  pid_init(&pos,13.0,0,0);
-  pid_init(&vel,10.0,0,0);
-  HAL_TIM_Base_Start_IT(&htim2);
+  /* 轮子不再做位置/速度环：固件只把上位机帧里的 torque [N*m] 换算成电流
+     （见 task/task.c 的 wheel_control_task）。关节电机初始化
+     （RobStrideInit / SetMode / Enable）放在调度器启动后的 motor_init_task 中，
+     用 vTaskDelay 代替 HAL_Delay，不依赖 TIM2 时基。 */
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
+  MX_FREERTOS_Init();
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -271,20 +200,19 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
-  RCC_OscInitStruct.HSICalibrationValue = 64;
+  RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 17;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 3;
+  RCC_OscInitStruct.PLL.PLLN = 68;
   RCC_OscInitStruct.PLL.PLLP = 1;
-  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   RCC_OscInitStruct.PLL.PLLR = 2;
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
-  RCC_OscInitStruct.PLL.PLLFRACN = 1536;
+  RCC_OscInitStruct.PLL.PLLFRACN = 6144;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -297,7 +225,7 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
@@ -326,13 +254,13 @@ void MPU_Config(void)
   */
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
-  MPU_InitStruct.BaseAddress = 0x0;
-  MPU_InitStruct.Size = MPU_REGION_SIZE_4GB;
-  MPU_InitStruct.SubRegionDisable = 0x87;
-  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
-  MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
-  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
-  MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
+  MPU_InitStruct.BaseAddress = 0x20000000;
+  MPU_InitStruct.Size = MPU_REGION_SIZE_128KB;
+  MPU_InitStruct.SubRegionDisable = 0;
+  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL1;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE;
+  MPU_InitStruct.IsShareable = MPU_ACCESS_NOT_SHAREABLE;
   MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
@@ -340,6 +268,28 @@ void MPU_Config(void)
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM2 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM2)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
 }
 
 /**
